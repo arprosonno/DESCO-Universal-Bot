@@ -29,35 +29,35 @@ LOW_BALANCE_THRESHOLD = 100
 RETRY_ATTEMPTS = 5
 RETRY_DELAY = 20  # seconds
 
-# In-memory user store (MULTI-USER SAFE)
-# { chat_id: { "account": "xxxx" } }
-USER_DATA = {}
+JOB_TIMEOUT = 120          # HARD STOP (seconds)
+TG_TIMEOUT = 20            # Telegram safety
+
+USER_DATA = {}  # { chat_id: { "account": "xxxx" } }
 
 # =================================================
-# DESCO SCRAPER
+# DESCO SCRAPER (SAFE)
 # =================================================
 
 async def fetch_desco_balance(account: str) -> float:
+    browser = None
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
             args=["--disable-blink-features=AutomationControlled"],
         )
-        page = await browser.new_page()
+        try:
+            page = await browser.new_page()
+            await page.goto(DESCO_URL, timeout=60_000)
+            await page.wait_for_selector("input", timeout=30_000)
+            await page.fill("input", account)
+            await page.keyboard.press("Enter")
+            await page.wait_for_timeout(6_000)
 
-        await page.goto(DESCO_URL, timeout=60_000)
-        await page.wait_for_selector("input", timeout=30_000)
-        await page.fill("input", account)
-        await page.keyboard.press("Enter")
-        await page.wait_for_timeout(6_000)
+            content = await page.inner_text("body")
+        finally:
+            await browser.close()
 
-        content = await page.inner_text("body")
-        await browser.close()
-
-    match = re.search(
-        r"Remaining Balance:\s*([\d,]+\.\d+)\s*BDT", content
-    )
-
+    match = re.search(r"Remaining Balance:\s*([\d,]+\.\d+)\s*BDT", content)
     if not match:
         raise RuntimeError("Balance not found")
 
@@ -66,7 +66,7 @@ async def fetch_desco_balance(account: str) -> float:
 
 async def fetch_with_retry(account: str) -> float:
     last_error = None
-    for i in range(RETRY_ATTEMPTS):
+    for _ in range(RETRY_ATTEMPTS):
         try:
             return await fetch_desco_balance(account)
         except Exception as e:
@@ -79,12 +79,9 @@ async def fetch_with_retry(account: str) -> float:
 # =================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    USER_DATA.setdefault(chat_id, {})
-
+    USER_DATA.setdefault(update.effective_chat.id, {})
     await update.message.reply_text(
-        "👋 Welcome!\n\n"
-        "Please send your DESCO account number."
+        "👋 Welcome!\n\nPlease send your DESCO account number."
     )
 
 
@@ -97,7 +94,6 @@ async def receive_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     USER_DATA.setdefault(chat_id, {})["account"] = account
-
     await update.message.reply_text(
         f"✅ Account saved: {account}\n\n"
         "You will now receive:\n"
@@ -110,32 +106,41 @@ async def receive_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    data = USER_DATA.get(chat_id)
-
+    data = USER_DATA.get(update.effective_chat.id)
     if not data or "account" not in data:
         await update.message.reply_text("❗ Send account number first.")
         return
 
     await update.message.reply_text("🔄 Checking balance...")
     try:
-        bal = await fetch_with_retry(data["account"])
+        bal = await asyncio.wait_for(
+            fetch_with_retry(data["account"]),
+            timeout=JOB_TIMEOUT,
+        )
         await update.message.reply_text(f"💡 Remaining Balance: {bal:.2f} BDT")
     except Exception:
         await update.message.reply_text("⚠️ Failed to fetch balance.")
 
 # =================================================
-# SCHEDULED JOBS (THIS IS WHAT YOU WERE MISSING)
+# SCHEDULED JOBS (HARDENED)
 # =================================================
 
-async def scheduled_updates(context: ContextTypes.DEFAULT_TYPE, label: str):
+async def safe_send(bot, chat_id, text):
+    await asyncio.wait_for(
+        bot.send_message(chat_id, text),
+        timeout=TG_TIMEOUT,
+    )
+
+
+async def scheduled_updates(context, label):
     for chat_id, data in USER_DATA.items():
         account = data.get("account")
         if not account:
             continue
         try:
             bal = await fetch_with_retry(account)
-            await context.bot.send_message(
+            await safe_send(
+                context.bot,
                 chat_id,
                 f"{label}\n💡 Remaining Balance: {bal:.2f} BDT",
             )
@@ -143,32 +148,45 @@ async def scheduled_updates(context: ContextTypes.DEFAULT_TYPE, label: str):
             pass
 
 
-async def morning_job(context: ContextTypes.DEFAULT_TYPE):
-    await scheduled_updates(context, "🌅 Good Morning!")
+async def morning_job(context):
+    await asyncio.wait_for(
+        scheduled_updates(context, "🌅 Good Morning!"),
+        timeout=JOB_TIMEOUT,
+    )
 
 
-async def evening_job(context: ContextTypes.DEFAULT_TYPE):
-    await scheduled_updates(context, "🌙 Good Evening!")
+async def evening_job(context):
+    await asyncio.wait_for(
+        scheduled_updates(context, "🌙 Good Evening!"),
+        timeout=JOB_TIMEOUT,
+    )
 
 
-async def ten_min_job(context: ContextTypes.DEFAULT_TYPE):
-    await scheduled_updates(context, "🔔 10-Min Update")
+async def ten_min_job(context):
+    await asyncio.wait_for(
+        scheduled_updates(context, "🔔 10-Min Update"),
+        timeout=JOB_TIMEOUT,
+    )
 
 
-async def low_balance_job(context: ContextTypes.DEFAULT_TYPE):
-    for chat_id, data in USER_DATA.items():
-        account = data.get("account")
-        if not account:
-            continue
-        try:
-            bal = await fetch_with_retry(account)
-            if bal < LOW_BALANCE_THRESHOLD:
-                await context.bot.send_message(
-                    chat_id,
-                    f"🚨 LOW BALANCE ALERT!\nRemaining: {bal:.2f} BDT",
-                )
-        except Exception:
-            pass
+async def low_balance_job(context):
+    async def _run():
+        for chat_id, data in USER_DATA.items():
+            account = data.get("account")
+            if not account:
+                continue
+            try:
+                bal = await fetch_with_retry(account)
+                if bal < LOW_BALANCE_THRESHOLD:
+                    await safe_send(
+                        context.bot,
+                        chat_id,
+                        f"🚨 LOW BALANCE ALERT!\nRemaining: {bal:.2f} BDT",
+                    )
+            except Exception:
+                pass
+
+    await asyncio.wait_for(_run(), timeout=JOB_TIMEOUT)
 
 # =================================================
 # MAIN
@@ -182,7 +200,6 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_account))
 
     jq = app.job_queue
-
     jq.run_daily(morning_job, time=time(10, 0, tzinfo=BD_TZ))
     jq.run_daily(evening_job, time=time(22, 0, tzinfo=BD_TZ))
     jq.run_repeating(ten_min_job, interval=600, first=600)
@@ -193,4 +210,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
