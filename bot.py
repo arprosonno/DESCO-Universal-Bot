@@ -29,7 +29,7 @@ LOW_BALANCE_THRESHOLD = 100
 RETRY_ATTEMPTS = 5
 RETRY_DELAY = 20  # seconds
 
-# In-memory user store (MULTI-USER SAFE)
+# In-memory multi-user store
 # { chat_id: { "account": "xxxx" } }
 USER_DATA = {}
 
@@ -57,7 +57,6 @@ async def fetch_desco_balance(account: str) -> float:
     match = re.search(
         r"Remaining Balance:\s*([\d,]+\.\d+)\s*BDT", content
     )
-
     if not match:
         raise RuntimeError("Balance not found")
 
@@ -66,13 +65,38 @@ async def fetch_desco_balance(account: str) -> float:
 
 async def fetch_with_retry(account: str) -> float:
     last_error = None
-    for i in range(RETRY_ATTEMPTS):
+    for _ in range(RETRY_ATTEMPTS):
         try:
             return await fetch_desco_balance(account)
         except Exception as e:
             last_error = e
             await asyncio.sleep(RETRY_DELAY)
     raise RuntimeError("All retries failed") from last_error
+
+# =================================================
+# HELP MENU
+# =================================================
+
+HELP_TEXT = (
+    "🤖 *DESCO Universal Bot*\n\n"
+    "*Commands:*\n"
+    "/start — Start the bot\n"
+    "/help — Show this menu\n"
+    "/menu — Same as /help\n"
+    "/balance — Check balance manually\n\n"
+    "*Automatic notifications:*\n"
+    "• 🌅 10:00 AM — Morning update\n"
+    "• 🌙 10:00 PM — Evening update\n"
+    "• 🔔 Every 10 minutes — Regular update\n"
+    "• 🚨 Low balance alerts (<100 BDT)\n\n"
+    "Just say *hi / hello / hey* for a greeting 🙂"
+)
+
+async def show_help(update: Update):
+    await update.message.reply_text(
+        HELP_TEXT,
+        parse_mode="Markdown"
+    )
 
 # =================================================
 # COMMANDS
@@ -83,9 +107,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     USER_DATA.setdefault(chat_id, {})
 
     await update.message.reply_text(
-        "👋 Welcome!\n\n"
-        "Please send your DESCO account number."
+        "👋 *Welcome to DESCO Universal Bot!*\n\n"
+        "Please send your *DESCO account number* to begin.",
+        parse_mode="Markdown"
     )
+
+    await show_help(update)
+
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await show_help(update)
+
+
+async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await show_help(update)
 
 
 async def receive_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -93,19 +128,18 @@ async def receive_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     account = update.message.text.strip()
 
     if not account.isdigit():
-        await update.message.reply_text("❌ Digits only. Send account number again.")
+        await update.message.reply_text(
+            "❌ Invalid account number.\nDigits only please."
+        )
         return
 
     USER_DATA.setdefault(chat_id, {})["account"] = account
 
     await update.message.reply_text(
-        f"✅ Account saved: {account}\n\n"
-        "You will now receive:\n"
-        "• 10 AM update\n"
-        "• 10 PM update\n"
-        "• Every 10 min update\n"
-        "• Low balance alerts\n\n"
-        "Use /balance anytime."
+        f"✅ *Account saved:* `{account}`\n\n"
+        "You are now subscribed to automatic notifications.\n"
+        "Use /balance anytime.",
+        parse_mode="Markdown"
     )
 
 
@@ -114,18 +148,34 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = USER_DATA.get(chat_id)
 
     if not data or "account" not in data:
-        await update.message.reply_text("❗ Send account number first.")
+        await update.message.reply_text(
+            "❗ Please send your DESCO account number first."
+        )
         return
 
-    await update.message.reply_text("🔄 Checking balance...")
+    await update.message.reply_text("🔄 Fetching balance...")
     try:
         bal = await fetch_with_retry(data["account"])
-        await update.message.reply_text(f"💡 Remaining Balance: {bal:.2f} BDT")
+        await update.message.reply_text(
+            f"💡 *Remaining Balance:*\n{bal:.2f} BDT",
+            parse_mode="Markdown"
+        )
     except Exception:
         await update.message.reply_text("⚠️ Failed to fetch balance.")
 
 # =================================================
-# SCHEDULED JOBS (THIS IS WHAT YOU WERE MISSING)
+# GREETINGS (hi / hello / hey / ho)
+# =================================================
+
+async def greetings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message.text.lower()
+    if any(word in msg for word in ["hi", "hello", "hey", "ho"]):
+        await update.message.reply_text(
+            "👋 Hello!\nUse /help to see what I can do 🙂"
+        )
+
+# =================================================
+# SCHEDULED JOBS (UNCHANGED)
 # =================================================
 
 async def scheduled_updates(context: ContextTypes.DEFAULT_TYPE, label: str):
@@ -152,7 +202,7 @@ async def evening_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def ten_min_job(context: ContextTypes.DEFAULT_TYPE):
-    await scheduled_updates(context, "🔔 10-Min Update")
+    await scheduled_updates(context, "🔔 10-Minute Update")
 
 
 async def low_balance_job(context: ContextTypes.DEFAULT_TYPE):
@@ -165,7 +215,8 @@ async def low_balance_job(context: ContextTypes.DEFAULT_TYPE):
             if bal < LOW_BALANCE_THRESHOLD:
                 await context.bot.send_message(
                     chat_id,
-                    f"🚨 LOW BALANCE ALERT!\nRemaining: {bal:.2f} BDT",
+                    f"🚨 *LOW BALANCE ALERT!*\nRemaining: {bal:.2f} BDT",
+                    parse_mode="Markdown",
                 )
         except Exception:
             pass
@@ -178,11 +229,14 @@ def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("balance", balance))
+
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, greetings))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_account))
 
     jq = app.job_queue
-
     jq.run_daily(morning_job, time=time(10, 0, tzinfo=BD_TZ))
     jq.run_daily(evening_job, time=time(22, 0, tzinfo=BD_TZ))
     jq.run_repeating(ten_min_job, interval=600, first=600)
@@ -191,6 +245,8 @@ def main():
     print("✅ DESCO Universal Bot RUNNING")
     app.run_polling()
 
+
 if __name__ == "__main__":
     main()
+
 
