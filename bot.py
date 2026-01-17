@@ -29,7 +29,6 @@ LOW_BALANCE_THRESHOLD = 100
 RETRY_ATTEMPTS = 5
 RETRY_DELAY = 20  # seconds
 
-# In-memory user store (MULTI-USER SAFE)
 # { chat_id: { "account": "xxxx" } }
 USER_DATA = {}
 
@@ -66,7 +65,7 @@ async def fetch_desco_balance(account: str) -> float:
 
 async def fetch_with_retry(account: str) -> float:
     last_error = None
-    for i in range(RETRY_ATTEMPTS):
+    for _ in range(RETRY_ATTEMPTS):
         try:
             return await fetch_desco_balance(account)
         except Exception as e:
@@ -84,28 +83,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "👋 Welcome!\n\n"
-        "Please send your DESCO account number."
+        "Please send your DESCO account number.\n\n"
+        "ℹ️ Type /help for commands."
     )
 
 
-async def receive_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    account = update.message.text.strip()
-
-    if not account.isdigit():
-        await update.message.reply_text("❌ Digits only. Send account number again.")
-        return
-
-    USER_DATA.setdefault(chat_id, {})["account"] = account
-
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"✅ Account saved: {account}\n\n"
-        "You will now receive:\n"
-        "• 10 AM update\n"
-        "• 10 PM update\n"
-        "• Every 10 min update\n"
-        "• Low balance alerts\n\n"
-        "Use /balance anytime."
+        "📖 *Help Menu*\n\n"
+        "➡️ Send DESCO account number (digits only)\n"
+        "➡️ /balance – Check balance\n\n"
+        "⏱ Automatic updates:\n"
+        "• 10 AM\n"
+        "• 10 PM\n"
+        "• Every 10 minutes\n"
+        "• Low balance alerts",
+        parse_mode="Markdown",
     )
 
 
@@ -125,7 +118,40 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Failed to fetch balance.")
 
 # =================================================
-# SCHEDULED JOBS (THIS IS WHAT YOU WERE MISSING)
+# MESSAGE HANDLERS (RESPONSIVE, SAFE)
+# =================================================
+
+async def greetings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.lower().strip()
+
+    if any(w in text for w in ["hi", "hello", "hey", "ho"]):
+        await update.message.reply_text(
+            "👋 Hello!\nSend your account number or type /help 🙂"
+        )
+
+
+async def receive_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    account = update.message.text.strip()
+
+    # IMPORTANT: ignore non-digit silently
+    if not account.isdigit():
+        return
+
+    USER_DATA.setdefault(chat_id, {})["account"] = account
+
+    await update.message.reply_text(
+        f"✅ Account saved: {account}\n\n"
+        "You will now receive:\n"
+        "• 10 AM update\n"
+        "• 10 PM update\n"
+        "• Every 10 min update\n"
+        "• Low balance alerts\n\n"
+        "Use /balance anytime."
+    )
+
+# =================================================
+# SCHEDULED JOBS (UNCHANGED)
 # =================================================
 
 async def scheduled_updates(context: ContextTypes.DEFAULT_TYPE, label: str):
@@ -177,12 +203,16 @@ async def low_balance_job(context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    # Commands
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("balance", balance))
+
+    # ORDER MATTERS
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, greetings))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_account))
 
     jq = app.job_queue
-
     jq.run_daily(morning_job, time=time(10, 0, tzinfo=BD_TZ))
     jq.run_daily(evening_job, time=time(22, 0, tzinfo=BD_TZ))
     jq.run_repeating(ten_min_job, interval=600, first=600)
@@ -191,7 +221,7 @@ def main():
     print("✅ DESCO Universal Bot RUNNING")
     app.run_polling()
 
+
 if __name__ == "__main__":
     main()
-
 
