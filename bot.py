@@ -29,27 +29,23 @@ LOW_BALANCE_THRESHOLD = 100
 RETRY_ATTEMPTS = 5
 RETRY_DELAY = 20  # seconds
 
-# Multi-user store
+# In-memory multi-user store
 # { chat_id: { "account": "xxxx" } }
-USER_DATA: dict[int, dict] = {}
-
-# Prevent concurrent Playwright launches
-DESCO_LOCK = asyncio.Lock()
+USER_DATA = {}
 
 # =================================================
-# DESCO SCRAPER (SAFE)
+# PLAYWRIGHT SCRAPER
 # =================================================
 
 async def fetch_desco_balance(account: str) -> float:
-    browser = None
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=["--disable-blink-features=AutomationControlled"],
-            )
-            page = await browser.new_page()
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+        page = await browser.new_page()
 
+        try:
             await page.goto(DESCO_URL, timeout=60_000)
             await page.wait_for_selector("input", timeout=30_000)
             await page.fill("input", account)
@@ -57,54 +53,47 @@ async def fetch_desco_balance(account: str) -> float:
             await page.wait_for_timeout(6_000)
 
             content = await page.inner_text("body")
+        finally:
+            await browser.close()
 
-        match = re.search(
-            r"Remaining Balance:\s*([\d,]+\.\d+)\s*BDT", content
-        )
+    match = re.search(
+        r"Remaining Balance:\s*([\d,]+\.\d+)\s*BDT", content
+    )
 
-        if not match:
-            raise RuntimeError("Balance not found")
+    if not match:
+        raise RuntimeError("Balance not found")
 
-        return float(match.group(1).replace(",", ""))
-
-    finally:
-        if browser:
-            try:
-                await browser.close()
-            except Exception:
-                pass
+    return float(match.group(1).replace(",", ""))
 
 
 async def fetch_with_retry(account: str) -> float:
-    async with DESCO_LOCK:
-        last_error = None
-        for attempt in range(1, RETRY_ATTEMPTS + 1):
-            try:
-                return await fetch_desco_balance(account)
-            except Exception as e:
-                last_error = e
-                print(f"[Retry {attempt}/{RETRY_ATTEMPTS}] {e}")
-                await asyncio.sleep(RETRY_DELAY)
-        raise RuntimeError("DESCO unreachable repeatedly") from last_error
+    last_error = None
+    for _ in range(RETRY_ATTEMPTS):
+        try:
+            return await fetch_desco_balance(account)
+        except Exception as e:
+            last_error = e
+            await asyncio.sleep(RETRY_DELAY)
+    raise RuntimeError("DESCO unreachable repeatedly") from last_error
 
 # =================================================
-# HELP MENU
+# HELP / MENU
 # =================================================
 
 HELP_TEXT = (
     "📌 *DESCO Balance Bot*\n\n"
-    "/start — Register your account\n"
+    "/start — Start the bot\n"
     "/balance — Check balance now\n"
     "/help — Show this menu\n\n"
-    "*Automatic services:*\n"
-    "• ⏰ 10:00 AM update\n"
-    "• 🌙 10:00 PM update\n"
+    "*Automatic alerts:*\n"
+    "• 🌅 10:00 AM\n"
+    "• 🌙 10:00 PM\n"
     "• 🔔 Every 10 minutes\n"
-    "• 🚨 Low balance alerts (<100 BDT)\n"
+    "• 🚨 Low balance alert\n"
 )
 
 # =================================================
-# COMMAND HANDLERS
+# COMMANDS
 # =================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -124,31 +113,22 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def receive_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    text = update.message.text.strip()
+    msg = update.message.text.strip()
 
-    # Greeting detection
-    if text.lower() in ("hi", "hello", "hey", "hola"):
-        await update.message.reply_text(
-            "👋 Hello!\nType /help to see what I can do."
-        )
+    # Greeting response
+    if msg.lower() in ("hi", "hello", "hey"):
+        await update.message.reply_text("👋 Hello! Use /help to see options.")
         return
 
-    if not text.isdigit():
-        await update.message.reply_text(
-            "❌ Invalid input.\nPlease send *digits only*.",
-            parse_mode="Markdown",
-        )
+    if not msg.isdigit():
+        await update.message.reply_text("❌ Digits only. Please send account number.")
         return
 
-    USER_DATA.setdefault(chat_id, {})["account"] = text
+    USER_DATA.setdefault(chat_id, {})["account"] = msg
 
     await update.message.reply_text(
-        f"✅ *Account saved!*\n\n"
-        "You will now receive:\n"
-        "• ⏰ 10 AM update\n"
-        "• 🌙 10 PM update\n"
-        "• 🔔 Every 10 min\n"
-        "• 🚨 Low balance alerts\n\n"
+        f"✅ Account saved: *{msg}*\n\n"
+        "You will now receive automatic updates.\n"
         "Use /balance anytime.",
         parse_mode="Markdown",
     )
@@ -159,26 +139,21 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = USER_DATA.get(chat_id)
 
     if not data or "account" not in data:
-        await update.message.reply_text("❗ Send your account number first.")
+        await update.message.reply_text("❗ Please send your account number first.")
         return
 
-    await update.message.reply_text("🔄 Fetching balance...")
+    await update.message.reply_text("🔄 Checking balance...")
     try:
         bal = await fetch_with_retry(data["account"])
-        await update.message.reply_text(
-            f"💡 *Remaining Balance:*\n{bal:.2f} BDT",
-            parse_mode="Markdown",
-        )
-    except Exception:
-        await update.message.reply_text(
-            "⚠️ DESCO unreachable right now. Try later."
-        )
+        await update.message.reply_text(f"💡 Remaining Balance: *{bal:.2f} BDT*", parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ {e}")
 
 # =================================================
 # SCHEDULED JOBS
 # =================================================
 
-async def send_to_all(context: ContextTypes.DEFAULT_TYPE, label: str):
+async def broadcast(context: ContextTypes.DEFAULT_TYPE, title: str):
     for chat_id, data in USER_DATA.items():
         account = data.get("account")
         if not account:
@@ -187,22 +162,23 @@ async def send_to_all(context: ContextTypes.DEFAULT_TYPE, label: str):
             bal = await fetch_with_retry(account)
             await context.bot.send_message(
                 chat_id,
-                f"{label}\n💡 Remaining Balance: {bal:.2f} BDT",
+                f"{title}\n💡 Remaining Balance: *{bal:.2f} BDT*",
+                parse_mode="Markdown",
             )
         except Exception:
             pass
 
 
 async def morning_job(context: ContextTypes.DEFAULT_TYPE):
-    await send_to_all(context, "🌅 Good Morning!")
+    await broadcast(context, "🌅 Good Morning!")
 
 
 async def evening_job(context: ContextTypes.DEFAULT_TYPE):
-    await send_to_all(context, "🌙 Good Evening!")
+    await broadcast(context, "🌙 Good Evening!")
 
 
 async def ten_min_job(context: ContextTypes.DEFAULT_TYPE):
-    await send_to_all(context, "🔔 10-Minute Update")
+    await broadcast(context, "🔔 10-Minute Update")
 
 
 async def low_balance_job(context: ContextTypes.DEFAULT_TYPE):
@@ -222,11 +198,24 @@ async def low_balance_job(context: ContextTypes.DEFAULT_TYPE):
             pass
 
 # =================================================
+# TELEGRAM CONFLICT FIX
+# =================================================
+
+async def post_init(app):
+    await app.bot.delete_webhook(drop_pending_updates=True)
+    print("✅ Telegram session cleaned")
+
+# =================================================
 # MAIN
 # =================================================
 
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
@@ -234,14 +223,14 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_account))
 
     jq = app.job_queue
-
     jq.run_daily(morning_job, time=time(10, 0, tzinfo=BD_TZ))
     jq.run_daily(evening_job, time=time(22, 0, tzinfo=BD_TZ))
     jq.run_repeating(ten_min_job, interval=600, first=600)
     jq.run_repeating(low_balance_job, interval=300, first=300)
 
     print("💓 Bot alive & scheduler running normally")
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()
