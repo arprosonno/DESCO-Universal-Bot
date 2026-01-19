@@ -1,6 +1,9 @@
-python-telegram-bot[job-queue]==20.8
+python-telegram-bot==20.8
 playwright==1.49.0
 pytz
+aiohttp
+
+
 
 
 
