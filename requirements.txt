@@ -1,7 +1,5 @@
-python-telegram-bot==20.8
-playwright==1.49.0
-pytz
-aiohttp
+python-telegram-bot==20.7
+
 
 
 
