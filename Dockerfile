@@ -1,24 +1,18 @@
-# Use Playwright official base image (with browsers pre-installed)
-FROM mcr.microsoft.com/playwright:focal
+# Official Playwright Python image (stable)
+FROM mcr.microsoft.com/playwright/python:v1.42.0-jammy
 
-# Set working directory
 WORKDIR /app
 
 # Copy project files
 COPY . .
 
-# Upgrade pip and install Python dependencies
-RUN pip install --upgrade pip
-RUN pip install -r requirements.txt
+# Install Python dependencies
+RUN python -m pip install --upgrade pip \
+    && python -m pip install -r requirements.txt
 
-# Expose port if needed (optional)
-EXPOSE 8080
-
-# Set environment variable placeholder
-ENV BOT_TOKEN=""
-
-# Start bot
+# Railway runs containers continuously
 CMD ["python", "bot.py"]
+
 
 
 
