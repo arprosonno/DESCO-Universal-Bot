@@ -23,7 +23,7 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN not set")
 
-DESCO_URL = "https://customer.nesco.gov.bd/pre/panel"
+DESCO_URL = "https://prepaid.desco.org.bd/customer/#/customer-info"
 BD_TZ = pytz.timezone("Asia/Dhaka")
 
 LOW_BALANCE_THRESHOLD = 100
@@ -265,6 +265,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
