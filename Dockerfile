@@ -2,7 +2,7 @@ FROM python:3.11-slim-bullseye
 
 WORKDIR /app
 
-# Install system dependencies including Playwright deps
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
     curl wget gnupg ca-certificates \
     fonts-liberation libnss3 libx11-xcb1 libxcomposite1 \
@@ -22,20 +22,10 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Install Playwright browser
 RUN playwright install --with-deps chromium
 
-# Copy railway config if exists
-COPY railway.json ./
-
-# Expose port
+# Expose port for health checks
 EXPOSE 8080
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8080/ || exit 1
 
 # Run the bot
 CMD ["python", "bot.py"]
-
-
-
 
 
