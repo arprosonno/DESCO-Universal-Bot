@@ -30,18 +30,15 @@ BD_TZ = pytz.timezone("Asia/Dhaka")
 
 LOW_BALANCE_THRESHOLD = 100
 
-FETCH_TIMEOUT = 45          # hard kill (seconds)
+FETCH_TIMEOUT = 45
 RETRY_ATTEMPTS = 3
-RETRY_DELAY = 15            # seconds
+RETRY_DELAY = 15
 
-# chat_id -> {"account": str}
 USER_DATA: Dict[int, Dict[str, str]] = {}
-
-# global semaphore to prevent scheduler pile-up
 FETCH_SEMAPHORE = asyncio.Semaphore(3)
 
 # =================================================
-# DESCO SCRAPER (HARD TIME-BOUND)
+# DESCO SCRAPER
 # =================================================
 
 async def fetch_desco_balance(account: str) -> float:
@@ -57,12 +54,11 @@ async def fetch_desco_balance(account: str) -> float:
         page = await browser.new_page()
 
         try:
-            await page.goto(DESCO_URL, timeout=30_000)
-            await page.wait_for_selector("input", timeout=20_000)
+            await page.goto(DESCO_URL, timeout=30000)
+            await page.wait_for_selector("input", timeout=20000)
             await page.fill("input", account)
             await page.keyboard.press("Enter")
-            await page.wait_for_timeout(6_000)
-
+            await page.wait_for_timeout(6000)
             content = await page.inner_text("body")
         finally:
             await browser.close()
@@ -70,13 +66,10 @@ async def fetch_desco_balance(account: str) -> float:
     match = re.search(r"Remaining Balance:\s*([\d,]+\.\d+)\s*BDT", content)
     if not match:
         raise RuntimeError("Balance not found")
-
     return float(match.group(1).replace(",", ""))
-
 
 async def fetch_with_retry(account: str) -> float:
     last_error = None
-
     async with FETCH_SEMAPHORE:
         for _ in range(RETRY_ATTEMPTS):
             try:
@@ -88,14 +81,11 @@ async def fetch_with_retry(account: str) -> float:
                 last_error = "Timeout while fetching DESCO"
             except Exception as e:
                 last_error = str(e)
-
             await asyncio.sleep(RETRY_DELAY)
-
-    raise RuntimeError("DESCO unreachable repeatedly") from None
-
+    raise RuntimeError("DESCO unreachable repeatedly")
 
 # =================================================
-# HELP TEXT
+# COMMANDS
 # =================================================
 
 HELP_TEXT = (
@@ -110,10 +100,6 @@ HELP_TEXT = (
     "• 🚨 Low balance alert\n"
 )
 
-# =================================================
-# COMMANDS
-# =================================================
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     USER_DATA.setdefault(chat_id, {})
@@ -122,10 +108,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
     )
 
-
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(HELP_TEXT, parse_mode="Markdown")
-
 
 async def receive_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -140,14 +124,10 @@ async def receive_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     USER_DATA.setdefault(chat_id, {})["account"] = msg
-
     await update.message.reply_text(
-        f"✅ Account saved: *{msg}*\n\n"
-        "Automatic alerts enabled.\n"
-        "Use /balance anytime.",
+        f"✅ Account saved: *{msg}*\n\nAutomatic alerts enabled.\nUse /balance anytime.",
         parse_mode="Markdown",
     )
-
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -167,9 +147,8 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"⚠️ {e}")
 
-
 # =================================================
-# SCHEDULED JOBS (FAIL-SAFE)
+# SCHEDULED JOBS
 # =================================================
 
 async def broadcast(context: ContextTypes.DEFAULT_TYPE, title: str):
@@ -177,7 +156,6 @@ async def broadcast(context: ContextTypes.DEFAULT_TYPE, title: str):
         account = data.get("account")
         if not account:
             continue
-
         try:
             bal = await fetch_with_retry(account)
             await context.bot.send_message(
@@ -188,13 +166,11 @@ async def broadcast(context: ContextTypes.DEFAULT_TYPE, title: str):
         except Exception:
             continue
 
-
 async def morning_job(context: ContextTypes.DEFAULT_TYPE):
     try:
         await broadcast(context, "🌅 Good Morning!")
     except Exception:
         pass
-
 
 async def evening_job(context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -202,13 +178,11 @@ async def evening_job(context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-
 async def ten_min_job(context: ContextTypes.DEFAULT_TYPE):
     try:
         await broadcast(context, "🔔 10-Minute Update")
     except Exception:
         pass
-
 
 async def low_balance_job(context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -216,7 +190,6 @@ async def low_balance_job(context: ContextTypes.DEFAULT_TYPE):
             account = data.get("account")
             if not account:
                 continue
-
             bal = await fetch_with_retry(account)
             if bal < LOW_BALANCE_THRESHOLD:
                 await context.bot.send_message(
@@ -227,122 +200,61 @@ async def low_balance_job(context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-
 # =================================================
-# SIMPLE HTTP SERVER FOR HEALTH CHECKS
+# MAIN FUNCTION - SIMPLIFIED
 # =================================================
-
-async def start_health_server():
-    """Start a simple HTTP server for Railway health checks"""
-    import aiohttp
-    from aiohttp import web
-    
-    app = web.Application()
-    
-    async def health_check(request):
-        return web.Response(text="OK", status=200)
-    
-    app.router.add_get('/', health_check)
-    app.router.add_get('/health', health_check)
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 8080)
-    await site.start()
-    print("✅ Health check server running on port 8080")
-    return runner
-
-
-# =================================================
-# MAIN
-# =================================================
-
-async def main_async():
-    """Async main function"""
-    print("🚀 Starting DESCO Balance Bot...")
-    
-    # Start health check server
-    health_server = await start_health_server()
-    
-    try:
-        # Build Telegram bot application
-        app = (
-            ApplicationBuilder()
-            .token(BOT_TOKEN)
-            .connection_pool_size(1)
-            .pool_timeout(30)
-            .build()
-        )
-        
-        # Add command handlers
-        app.add_handler(CommandHandler("start", start))
-        app.add_handler(CommandHandler("help", help_cmd))
-        app.add_handler(CommandHandler("balance", balance))
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_account))
-        
-        # Setup job queue
-        jq = app.job_queue
-        if jq:
-            jq.run_daily(morning_job, time=time(10, 0, tzinfo=BD_TZ))
-            jq.run_daily(evening_job, time=time(22, 0, tzinfo=BD_TZ))
-            jq.run_repeating(ten_min_job, interval=600, first=600)
-            jq.run_repeating(low_balance_job, interval=300, first=300)
-            print("✅ Job scheduler initialized")
-        
-        # Initialize bot
-        await app.initialize()
-        await app.start()
-        print("✅ Bot started successfully")
-        
-        # Start polling
-        await app.updater.start_polling(
-            drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES
-        )
-        print("💓 Bot is now polling for messages...")
-        
-        # Keep running until interrupted
-        while True:
-            await asyncio.sleep(3600)  # Sleep for 1 hour
-        
-    except asyncio.CancelledError:
-        print("🛑 Shutdown requested...")
-    except Exception as e:
-        print(f"💥 Error: {e}")
-        raise
-    finally:
-        # Cleanup
-        if 'app' in locals():
-            await app.updater.stop()
-            await app.stop()
-            await app.shutdown()
-        if health_server:
-            await health_server.cleanup()
-        print("✅ Cleanup complete")
-
 
 def main():
-    """Main entry point with restart logic"""
+    print("🚀 Starting DESCO Balance Bot...")
+    
+    # Initialize application
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .connection_pool_size(1)
+        .pool_timeout(30)
+        .build()
+    )
+    
+    # Add handlers
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("balance", balance))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_account))
+    
+    # Setup job queue
+    jq = app.job_queue
+    if jq:
+        jq.run_daily(morning_job, time=time(10, 0, tzinfo=BD_TZ))
+        jq.run_daily(evening_job, time=time(22, 0, tzinfo=BD_TZ))
+        jq.run_repeating(ten_min_job, interval=600, first=600)
+        jq.run_repeating(low_balance_job, interval=300, first=300)
+        print("✅ Job scheduler initialized")
+    
+    # Run the bot
+    app.run_polling(
+        drop_pending_updates=True,
+        allowed_updates=Update.ALL_TYPES,
+        close_loop=False
+    )
+
+if __name__ == "__main__":
+    # Simple restart logic
     max_restarts = 5
     restart_delay = 30
     
     for attempt in range(max_restarts):
         try:
-            print(f"Attempt {attempt + 1}/{max_restarts}")
-            asyncio.run(main_async())
+            print(f"📡 Attempt {attempt + 1}/{max_restarts}")
+            main()
         except KeyboardInterrupt:
             print("🛑 Bot stopped by user")
             sys.exit(0)
         except Exception as e:
-            print(f"💥 Bot crashed: {e}")
+            print(f"💥 Bot crashed: {type(e).__name__}: {e}")
             if attempt < max_restarts - 1:
                 print(f"🔄 Restarting in {restart_delay} seconds...")
                 ttime.sleep(restart_delay)
             else:
                 print("❌ Max restart attempts reached")
                 sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()
-
