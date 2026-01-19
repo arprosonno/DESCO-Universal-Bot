@@ -1,8 +1,8 @@
-FROM python:3.11-bullseye
+FROM python:3.11-slim-bullseye
 
 WORKDIR /app
 
-# System deps for Playwright
+# Install system dependencies including Playwright deps
 RUN apt-get update && apt-get install -y \
     curl wget gnupg ca-certificates \
     fonts-liberation libnss3 libx11-xcb1 libxcomposite1 \
@@ -11,17 +11,29 @@ RUN apt-get update && apt-get install -y \
     libdrm2 libxinerama1 libglib2.0-0 libfontconfig1 libxext6 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY . .
+# Copy application files
+COPY requirements.txt .
+COPY bot.py .
 
-RUN pip install --upgrade pip
-RUN pip install -r requirements.txt
+# Install Python dependencies
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-RUN playwright install --with-deps
+# Install Playwright browser
+RUN playwright install --with-deps chromium
 
+# Copy railway config if exists
+COPY railway.json ./
+
+# Expose port
 EXPOSE 8080
 
-CMD ["python", "bot.py"]
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/ || exit 1
 
+# Run the bot
+CMD ["python", "bot.py"]
 
 
 
