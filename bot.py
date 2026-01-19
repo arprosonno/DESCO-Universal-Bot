@@ -2,6 +2,7 @@ import asyncio
 import os
 import re
 import sys
+import fcntl
 from datetime import time
 from typing import Dict
 import time as ttime
@@ -16,6 +17,30 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+
+# =================================================
+# INSTANCE LOCKING - Prevent multiple instances
+# =================================================
+
+def acquire_instance_lock():
+    """Create a file lock to prevent multiple bot instances"""
+    lock_file = '/tmp/desco_bot.lock'
+    lock_fd = open(lock_file, 'w')
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        print("🔒 Instance lock acquired")
+        return lock_fd
+    except BlockingIOError:
+        print("❌ Another instance is already running. Waiting 10 seconds...")
+        # Wait a bit and try again
+        ttime.sleep(10)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            print("🔒 Instance lock acquired after wait")
+            return lock_fd
+        except BlockingIOError:
+            print("❌ Still locked. Exiting.")
+            sys.exit(1)
 
 # =================================================
 # CONFIG
@@ -201,52 +226,72 @@ async def low_balance_job(context: ContextTypes.DEFAULT_TYPE):
         pass
 
 # =================================================
-# MAIN FUNCTION - SIMPLIFIED
+# MAIN FUNCTION WITH PROPER CLEANUP
 # =================================================
 
 def main():
     print("🚀 Starting DESCO Balance Bot...")
     
-    # Initialize application
-    app = (
-        ApplicationBuilder()
-        .token(BOT_TOKEN)
-        .connection_pool_size(1)
-        .pool_timeout(30)
-        .build()
-    )
+    # Acquire instance lock first
+    lock = acquire_instance_lock()
     
-    # Add handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("balance", balance))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_account))
-    
-    # Setup job queue
-    jq = app.job_queue
-    if jq:
-        jq.run_daily(morning_job, time=time(10, 0, tzinfo=BD_TZ))
-        jq.run_daily(evening_job, time=time(22, 0, tzinfo=BD_TZ))
-        jq.run_repeating(ten_min_job, interval=600, first=600)
-        jq.run_repeating(low_balance_job, interval=300, first=300)
-        print("✅ Job scheduler initialized")
-    
-    # Run the bot
-    app.run_polling(
-        drop_pending_updates=True,
-        allowed_updates=Update.ALL_TYPES,
-        close_loop=False
-    )
+    try:
+        # Initialize application
+        app = (
+            ApplicationBuilder()
+            .token(BOT_TOKEN)
+            .connection_pool_size(1)
+            .pool_timeout(30)
+            .build()
+        )
+        
+        # Add handlers
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("help", help_cmd))
+        app.add_handler(CommandHandler("balance", balance))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_account))
+        
+        # Setup job queue
+        jq = app.job_queue
+        if jq:
+            jq.run_daily(morning_job, time=time(10, 0, tzinfo=BD_TZ))
+            jq.run_daily(evening_job, time=time(22, 0, tzinfo=BD_TZ))
+            jq.run_repeating(ten_min_job, interval=600, first=600)
+            jq.run_repeating(low_balance_job, interval=300, first=300)
+            print("✅ Job scheduler initialized")
+        
+        # Run the bot
+        print("💓 Bot is now running...")
+        app.run_polling(
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES,
+            close_loop=False
+        )
+        
+    except KeyboardInterrupt:
+        print("🛑 Bot stopped by user")
+    except Exception as e:
+        print(f"💥 Bot crashed: {type(e).__name__}: {e}")
+        raise
+    finally:
+        # Release lock on exit
+        import fcntl
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        lock.close()
+        print("🔓 Instance lock released")
+        print("✅ Cleanup complete")
 
 if __name__ == "__main__":
     # Simple restart logic
-    max_restarts = 5
+    max_restarts = 3
     restart_delay = 30
     
     for attempt in range(max_restarts):
         try:
             print(f"📡 Attempt {attempt + 1}/{max_restarts}")
             main()
+            # If main() returns normally, break the loop
+            break
         except KeyboardInterrupt:
             print("🛑 Bot stopped by user")
             sys.exit(0)
@@ -258,3 +303,4 @@ if __name__ == "__main__":
             else:
                 print("❌ Max restart attempts reached")
                 sys.exit(1)
+
