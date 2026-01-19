@@ -229,102 +229,117 @@ async def low_balance_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 # =================================================
-# TELEGRAM SESSION CLEANUP
+# SIMPLE HTTP SERVER FOR HEALTH CHECKS
 # =================================================
 
-async def post_init(app):
-    """Initialize bot after startup"""
-    print("🔄 Initializing bot...")
+async def start_health_server():
+    """Start a simple HTTP server for Railway health checks"""
+    import aiohttp
+    from aiohttp import web
+    
+    app = web.Application()
+    
+    async def health_check(request):
+        return web.Response(text="OK", status=200)
+    
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    await site.start()
+    print("✅ Health check server running on port 8080")
+    return runner
+
+
+# =================================================
+# MAIN
+# =================================================
+
+async def main_async():
+    """Async main function"""
+    print("🚀 Starting DESCO Balance Bot...")
+    
+    # Start health check server
+    health_server = await start_health_server()
+    
     try:
-        # Get bot info to verify connection
-        bot_info = await app.bot.get_me()
-        print(f"✅ Bot initialized: @{bot_info.username}")
+        # Build Telegram bot application
+        app = (
+            ApplicationBuilder()
+            .token(BOT_TOKEN)
+            .connection_pool_size(1)
+            .pool_timeout(30)
+            .build()
+        )
         
-        # Clean any pending updates
-        await app.bot.delete_webhook(drop_pending_updates=True)
-        print("✅ Webhook cleaned up")
+        # Add command handlers
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("help", help_cmd))
+        app.add_handler(CommandHandler("balance", balance))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_account))
+        
+        # Setup job queue
+        jq = app.job_queue
+        if jq:
+            jq.run_daily(morning_job, time=time(10, 0, tzinfo=BD_TZ))
+            jq.run_daily(evening_job, time=time(22, 0, tzinfo=BD_TZ))
+            jq.run_repeating(ten_min_job, interval=600, first=600)
+            jq.run_repeating(low_balance_job, interval=300, first=300)
+            print("✅ Job scheduler initialized")
+        
+        # Initialize bot
+        await app.initialize()
+        await app.start()
+        print("✅ Bot started successfully")
+        
+        # Start polling
+        await app.updater.start_polling(
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES
+        )
+        print("💓 Bot is now polling for messages...")
+        
+        # Keep running until interrupted
+        while True:
+            await asyncio.sleep(3600)  # Sleep for 1 hour
+        
+    except asyncio.CancelledError:
+        print("🛑 Shutdown requested...")
     except Exception as e:
-        print(f"⚠️ Warning during init: {e}")
+        print(f"💥 Error: {e}")
+        raise
+    finally:
+        # Cleanup
+        if 'app' in locals():
+            await app.updater.stop()
+            await app.stop()
+            await app.shutdown()
+        if health_server:
+            await health_server.cleanup()
+        print("✅ Cleanup complete")
 
-async def post_shutdown(app):
-    """Clean shutdown handler"""
-    print("🛑 Shutting down bot...")
-    
-    # Stop job queue gracefully
-    if app.job_queue:
-        print("🛑 Stopping job queue...")
-        app.job_queue.stop()
-    
-    # Wait for pending tasks
-    await asyncio.sleep(2)
-    print("✅ Bot shutdown complete")
-
-
-# =================================================
-# MAIN WITH ENHANCED ERROR HANDLING
-# =================================================
 
 def main():
-    """Main entry point with restart capability"""
+    """Main entry point with restart logic"""
     max_restarts = 5
-    restart_delay = 30  # seconds
+    restart_delay = 30
     
     for attempt in range(max_restarts):
         try:
-            print(f"🚀 Starting bot (attempt {attempt + 1}/{max_restarts})...")
-            
-            # Build application with proper configuration
-            app = (
-                ApplicationBuilder()
-                .token(BOT_TOKEN)
-                .post_init(post_init)
-                .post_shutdown(post_shutdown)
-                .connection_pool_size(1)  # Single connection pool
-                .pool_timeout(30)
-                .build()
-            )
-
-            # Add command handlers
-            app.add_handler(CommandHandler("start", start))
-            app.add_handler(CommandHandler("help", help_cmd))
-            app.add_handler(CommandHandler("balance", balance))
-            app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_account))
-
-            # Setup job queue
-            jq = app.job_queue
-            if jq:
-                jq.run_daily(morning_job, time=time(10, 0, tzinfo=BD_TZ))
-                jq.run_daily(evening_job, time=time(22, 0, tzinfo=BD_TZ))
-                jq.run_repeating(ten_min_job, interval=600, first=600)
-                jq.run_repeating(low_balance_job, interval=300, first=300)
-                print("✅ Job scheduler initialized")
-
-            print("💓 Bot is now running...")
-            
-            # Run with proper shutdown handling
-            app.run_polling(
-                drop_pending_updates=True,
-                allowed_updates=Update.ALL_TYPES,
-                close_loop=False,    # Don't close event loop
-                stop_signals=None    # Disable signal handling for Railway
-            )
-            
-            # If we get here, bot stopped normally
-            print("🛑 Bot stopped normally")
-            break
-            
+            print(f"Attempt {attempt + 1}/{max_restarts}")
+            asyncio.run(main_async())
         except KeyboardInterrupt:
             print("🛑 Bot stopped by user")
             sys.exit(0)
-            
         except Exception as e:
-            print(f"💥 Bot crashed with error: {e}")
-            
+            print(f"💥 Bot crashed: {e}")
             if attempt < max_restarts - 1:
                 print(f"🔄 Restarting in {restart_delay} seconds...")
                 ttime.sleep(restart_delay)
             else:
-                print("❌ Max restart attempts reached. Exiting.")
+                print("❌ Max restart attempts reached")
                 sys.exit(1)
 
 
